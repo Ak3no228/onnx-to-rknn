@@ -12,12 +12,6 @@ import onnx
 INPUT_DIR = "/workspace/input_models"
 OUTPUT_DIR = "/workspace/output_models"
 
-# "w8a8","w4a16", "w8a16", "w4a8", "w16a16i" and "w16a16i_dfp" — Rockchip documentation
-# w16a16i_dfp(*), w16a16i(*), w8a8 — works with rk3566
-# (*) — not supported by rk3566 according to Rockchip documentation, but works in practice
-# w4a16, w8a16 — not supported by rk3566, like really not supported
-# w4a8 — exists only in documentation, not in rknn api
-# w8a16 is forced when `quantize_weight` (which is "about to be deprecated") is set to True
 DEFAULT_QUANT_DTYPE = "w8a8"
 
 TARGET_PLATFORMS = {
@@ -26,26 +20,21 @@ TARGET_PLATFORMS = {
 }
 DEFAULT_TARGET_PLATFORM = "RK3566"
 
-# Default shapes (Width, Height) if --resolutions is not provided
-DEFAULT_SHAPES = [
-    (1440, 320), (1440, 384), (1440, 404),
-    (1536, 448), (1536, 512), (1536, 576)
-]
+DEFAULT_SHAPES = [(128, 32)]
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 
 # --- Helper Functions ---
 def download_model(url: str, target_dir: str) -> str | None:
-    """Downloads a model from a URL to the target directory."""
     try:
         response = requests.get(url, stream=True)
-        response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+        response.raise_for_status()
 
         parsed_url = urlparse(url)
         filename = os.path.basename(parsed_url.path)
         if not filename:
-            filename = "downloaded_model.onnx" # Fallback filename
+            filename = "downloaded_model.onnx"
 
         target_path = os.path.join(target_dir, filename)
         os.makedirs(target_dir, exist_ok=True)
@@ -56,16 +45,12 @@ def download_model(url: str, target_dir: str) -> str | None:
                 f.write(chunk)
         logging.info("Download complete.")
         return target_path
-    except requests.exceptions.RequestException as e:
+    except Exception as e:
         logging.error(f"Failed to download model from {url}: {e}")
-        return None
-    except OSError as e:
-        logging.error(f"Failed to save model to {target_path}: {e}")
         return None
 
 
 def parse_resolutions(res_string: str) -> list[tuple[int, int]] | None:
-    """Parses a 'WxH,WxH,...' string into a list of (Width, Height) tuples."""
     shapes = []
     try:
         pairs = res_string.strip().split(',')
@@ -81,58 +66,27 @@ def parse_resolutions(res_string: str) -> list[tuple[int, int]] | None:
             raise ValueError("No valid resolutions found in the string.")
         return shapes
     except ValueError as e:
-        logging.error(f"Invalid format in resolutions string '{res_string}'. Use 'WxH,WxH,...'. Error: {e}")
+        logging.error(f"Invalid format in resolutions string '{res_string}': {e}")
         return None
 
 
 def parse_args():
-    """Parses command-line arguments."""
-    p = argparse.ArgumentParser(
-        description="Convert ONNX model (local or URL) to multiple fixed-shape RKNN models."
-    )
-    p.add_argument(
-        "--model_source",
-        required=True,
-        help="URL of the ONNX model or local filename (expected in input_models directory)."
-    )
-    p.add_argument(
-        "--target_platform",
-        default=DEFAULT_TARGET_PLATFORM,
-        choices=TARGET_PLATFORMS,
-        help=f"Target platform for RKNN model. Default: {DEFAULT_TARGET_PLATFORM}."
-    )
-    p.add_argument(
-        "--resolutions",
-        help="Comma-separated list of target resolutions in WxH format (e.g., '1440x384,1536x512'). Defaults to predefined list if not specified."
-    )
-    p.add_argument(
-        "-v", "--verbose",
-        action="store_true",
-        help="Enable verbose output from RKNN."
-    )
+    p = argparse.ArgumentParser(description="Convert ONNX Grayscale model to RKNN")
+    p.add_argument("--model_source", required=True, help="URL or local filename")
+    p.add_argument("--target_platform", default=DEFAULT_TARGET_PLATFORM, choices=TARGET_PLATFORMS)
+    p.add_argument("--resolutions", help="WxH format, e.g. 128x32")
+    p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args()
 
 
 def get_onnx_input_name(model_path: str) -> str | None:
-    """Loads ONNX model and returns the name of the first input tensor."""
     try:
-        logging.info(f"Loading ONNX model {model_path} to determine input name...")
         onnx_model = onnx.load(model_path)
         if not onnx_model.graph.input:
-            logging.error("ONNX model graph has no inputs!")
             return None
-        # For ESRGAN, there is usually one input. We take the name of the first one.
-        input_name = onnx_model.graph.input[0].name
-        input_shape = [d.dim_param if d.dim_param else d.dim_value for d in onnx_model.graph.input[0].type.tensor_type.shape.dim]
-        logging.info(f"Detected input name: '{input_name}' with shape hint: {input_shape}")
-
-        if len(onnx_model.graph.input) > 1:
-            logging.warning(f"Model has multiple inputs ({len(onnx_model.graph.input)}). Using the first one: '{input_name}'. Ensure this is correct.")
-
-        return input_name
-
+        return onnx_model.graph.input[0].name
     except Exception as e:
-        logging.error(f"Failed to load or parse ONNX model {model_path}: {e}")
+        logging.error(f"Failed to load ONNX model {model_path}: {e}")
         return None
 
 
@@ -142,58 +96,40 @@ def main():
     onnx_model_path = None
     errors_occurred = False
 
-    # 0. Validate target platform
-    logging.info(f"Target platform: {args.target_platform}")
     target_platform = args.target_platform.lower()
-    if target_platform not in {p.lower() for p in TARGET_PLATFORMS}:
-        logging.error(f"Invalid target platform '{target_platform}'. Supported platforms: {TARGET_PLATFORMS}.")
-        sys.exit(1)
 
-    # 1. Determine and prepare ONNX model path
     source = args.model_source
     if source.startswith("http://") or source.startswith("https://"):
         onnx_model_path = download_model(source, INPUT_DIR)
         if not onnx_model_path:
-            sys.exit(1) # Exit if download failed
+            sys.exit(1)
     else:
-        # Assume it's a local filename
         local_path = os.path.join(INPUT_DIR, source)
         if os.path.exists(local_path):
             onnx_model_path = local_path
-            logging.info(f"Using local model: {onnx_model_path}")
         else:
             logging.error(f"Local model file not found: {local_path}")
             sys.exit(1)
 
-    # 2. Determine ONNX input name
     onnx_input_name = get_onnx_input_name(onnx_model_path)
     if not onnx_input_name:
         logging.error("Could not determine ONNX input name. Aborting.")
         sys.exit(1)
 
-    # 3. Determine target shapes
     target_shapes = []
     if args.resolutions:
         parsed_shapes = parse_resolutions(args.resolutions)
         if parsed_shapes:
             target_shapes = parsed_shapes
-            shape_count = len(target_shapes)
-            logging.info(f"Using provided {shape_count} {'resolution' if shape_count == 1 else 'resolutions'}: {target_shapes}")
         else:
-            sys.exit(1) # Exit if parsing failed
+            sys.exit(1)
     else:
         target_shapes = DEFAULT_SHAPES
-        logging.info(f"Using default resolutions: {target_shapes}")
 
-    # 4. Get base model name for output files
     base_model_name = os.path.splitext(os.path.basename(onnx_model_path))[0]
-
-    # 5. Ensure output directory exists
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # 6. Conversion loop
-    quant_dtype = DEFAULT_QUANT_DTYPE # Doeesn't affect when do_quantization=False
-    logging.info(f"Starting conversion for {len(target_shapes)} {'shape' if len(target_shapes) == 1 else 'shapes'}...")
+    quant_dtype = DEFAULT_QUANT_DTYPE
 
     for width, height in target_shapes:
         rknn = None
@@ -202,29 +138,28 @@ def main():
             logging.info(f"--- Converting shape: {shape_str} ---")
             rknn = RKNN(verbose=args.verbose)
 
-            logging.info("[1/4] Configuring RKNN...")
+            logging.info("[1/4] Configuring RKNN for Grayscale (1 channel)...")
+            # ИСПРАВЛЕНИЕ: передаем 1 значение для 1 канала (Grayscale)
             rknn.config(
                 target_platform=target_platform,
                 quantized_dtype=quant_dtype,
-                mean_values=[[0, 0, 0]],
-                std_values=[[255, 255, 255]],
+                mean_values=[[0]],
+                std_values=[[255]],
                 optimization_level=1
             )
-            # Config doesn't return a useful value to check
 
-            logging.info(f"[2/4] Loading ONNX model: {onnx_model_path}, detected input name: '{onnx_input_name}'...")
+            logging.info(f"[2/4] Loading ONNX model with 1 channel [1, 1, {height}, {width}]...")
+            # ИСПРАВЛЕНИЕ: подставляем 1 канал вместо 3
             ret = rknn.load_onnx(
                 model=onnx_model_path,
                 inputs=[onnx_input_name],
-                input_size_list=[[1, 3, height, width]] # Note: H, W order
+                input_size_list=[[1, 1, height, width]] 
             )
             if ret != 0: raise RuntimeError(f"RKNN load_onnx failed with code {ret}")
-            logging.info("ONNX model loaded successfully.")
 
             logging.info("[3/4] Building RKNN model...")
             ret = rknn.build(do_quantization=False)
             if ret != 0: raise RuntimeError(f"RKNN build failed with code {ret}")
-            logging.info("RKNN model built successfully.")
 
             output_filename = f"{base_model_name}_{args.target_platform}_{shape_str}.rknn"
             output_path = os.path.join(OUTPUT_DIR, output_filename)
@@ -239,15 +174,10 @@ def main():
         finally:
             if rknn:
                 rknn.release()
-                logging.debug(f"RKNN object released for shape {shape_str}.")
 
-    # 7. Final status
-    logging.info("--- Conversion process finished ---")
     if errors_occurred:
-        logging.warning("Some shapes failed to convert. Check logs above.")
         sys.exit(1)
     else:
-        logging.info("All shapes converted successfully!")
         sys.exit(0)
 
 if __name__ == "__main__":
