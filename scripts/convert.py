@@ -140,11 +140,18 @@ def main():
 
             logging.info("[1/4] Configuring RKNN for Grayscale (1 channel)...")
             # ИСПРАВЛЕНИЕ: передаем 1 значение для 1 канала (Grayscale)
+            # rknn.config(
+            #     target_platform=target_platform,
+            #     quantized_dtype=quant_dtype,
+            #     mean_values=[[0]],
+            #     std_values=[[255]],
+            #     optimization_level=1
+            # )
             rknn.config(
                 target_platform=target_platform,
                 quantized_dtype=quant_dtype,
-                mean_values=[[0]],
-                std_values=[[255]],
+                mean_values=None,       # УБРАТЬ [[0]]
+                std_values=None,        # УБРАТЬ [[255]]
                 optimization_level=1
             )
 
@@ -155,6 +162,7 @@ def main():
                 inputs=[onnx_input_name],
                 input_size_list=[[1, 1, height, width]] 
             )
+            
             if ret != 0: raise RuntimeError(f"RKNN load_onnx failed with code {ret}")
 
             logging.info("[3/4] Building RKNN model...")
