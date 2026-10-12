@@ -20,7 +20,8 @@ TARGET_PLATFORMS = {
 }
 DEFAULT_TARGET_PLATFORM = "RK3566"
 
-DEFAULT_SHAPES = [(128, 32)]
+# Изменили дефолтное разрешение под вашу модель HeadNet (128x128)
+DEFAULT_SHAPES = [(128, 128)]
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
@@ -71,10 +72,10 @@ def parse_resolutions(res_string: str) -> list[tuple[int, int]] | None:
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Convert ONNX Grayscale model to RKNN")
+    p = argparse.ArgumentParser(description="Convert ONNX RGB HeadNet model to RKNN")
     p.add_argument("--model_source", required=True, help="URL or local filename")
     p.add_argument("--target_platform", default=DEFAULT_TARGET_PLATFORM, choices=TARGET_PLATFORMS)
-    p.add_argument("--resolutions", help="WxH format, e.g. 128x32")
+    p.add_argument("--resolutions", help="WxH format, e.g. 128x128")
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args()
 
@@ -138,29 +139,22 @@ def main():
             logging.info(f"--- Converting shape: {shape_str} ---")
             rknn = RKNN(verbose=args.verbose)
 
-            logging.info("[1/4] Configuring RKNN for Grayscale (1 channel)...")
-            # ИСПРАВЛЕНИЕ: передаем 1 значение для 1 канала (Grayscale)
-            # rknn.config(
-            #     target_platform=target_platform,
-            #     quantized_dtype=quant_dtype,
-            #     mean_values=[[0]],
-            #     std_values=[[255]],
-            #     optimization_level=1
-            # )
+            logging.info("[1/4] Configuring RKNN for RGB HeadNet (3 channels, 0..1 normalization)...")
+            # Настройка под RGB: 3 канала. 
+            # mean_values=[[0, 0, 0]], std_values=[[255, 255, 255]] переводят входные байты (0-255) в диапазон 0..1 (как в PyTorch)
             rknn.config(
                 target_platform=target_platform,
                 quantized_dtype=quant_dtype,
-                mean_values=None,       # УБРАТЬ [[0]]
-                std_values=None,        # УБРАТЬ [[255]]
+                mean_values=[[0, 0, 0]],
+                std_values=[[255, 255, 255]],
                 optimization_level=1
             )
 
-            logging.info(f"[2/4] Loading ONNX model with 1 channel [1, 1, {height}, {width}]...")
-            # ИСПРАВЛЕНИЕ: подставляем 1 канал вместо 3
+            logging.info(f"[2/4] Loading ONNX model with RGB [1, 3, {height}, {width}]...")
             ret = rknn.load_onnx(
                 model=onnx_model_path,
                 inputs=[onnx_input_name],
-                input_size_list=[[1, 1, height, width]] 
+                input_size_list=[[1, 3, height, width]]  # 3 канала вместо 1
             )
             
             if ret != 0: raise RuntimeError(f"RKNN load_onnx failed with code {ret}")
